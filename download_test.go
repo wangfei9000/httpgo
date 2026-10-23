@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -565,6 +566,88 @@ func TestRunFlags(t *testing.T) {
 		t.Fatal("expected scheme error")
 	}
 }
+
+// TestProbeSkipsHead 检查支持分段时不会先发 HEAD，避免启动前多等一次响应。
+func TestProbeSkipsHead(t *testing.T) {
+	data := bytes.Repeat([]byte("ab"), 2000)
+	var heads atomic.Int32
+	srv := newFileServer(t, data, `"v1"`, func(r *http.Request) {
+		if r.Method == http.MethodHead {
+			heads.Add(1)
+		}
+	})
+	defer srv.Close()
+	dir := t.TempDir()
+	err := Download(context.Background(), Option{
+		URL:         srv.URL + "/a.bin",
+		Output:      filepath.Join(dir, "a.bin"),
+		Concurrency: 2,
+		Retries:     0,
+		IdleTimeout: 5 * time.Second,
+		Client:      testClient(srv, 2),
+		Quiet:       true,
+		Stderr:      io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if heads.Load() != 0 {
+		t.Fatalf("HEAD requests=%d", heads.Load())
+	}
+}
+
+// TestHeaderTimeoutRetries 检查等待响应头超时会重试，而不是把整次下载停掉。
+func TestHeaderTimeoutRetries(t *testing.T) {
+	hdr := timeoutLikeError{}
+	wrapped := temporary(&url.Error{Op: "Get", URL: "https://cdn.example/a.mp4", Err: hdr})
+	if !retryable(wrapped) {
+		t.Fatal("response header timeout should be retried")
+	}
+	if retryable(context.DeadlineExceeded) {
+		t.Fatal("caller deadline should not be retried")
+	}
+	if retryable(context.Canceled) {
+		t.Fatal("cancel should not be retried")
+	}
+
+	data := bytes.Repeat([]byte("ab"), 1500)
+	var slow atomic.Bool
+	srv := newFileServer(t, data, `"v1"`, func(r *http.Request) {
+		rg := r.Header.Get("Range")
+		if r.Method != http.MethodGet || rg == "" || rg == "bytes=0-0" {
+			return
+		}
+		if slow.CompareAndSwap(false, true) {
+			time.Sleep(400 * time.Millisecond)
+		}
+	})
+	defer srv.Close()
+
+	dir := t.TempDir()
+	c := testClient(srv, 1)
+	c.Transport.(*http.Transport).ResponseHeaderTimeout = 150 * time.Millisecond
+	err := Download(context.Background(), Option{
+		URL:         srv.URL + "/a.bin",
+		Output:      filepath.Join(dir, "a.bin"),
+		Concurrency: 1,
+		Retries:     2,
+		IdleTimeout: 5 * time.Second,
+		Client:      c,
+		Quiet:       true,
+		Stderr:      io.Discard,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
+// timeoutLikeError 模仿 net/http 的响应头超时：它同时算作 DeadlineExceeded。
+type timeoutLikeError struct{}
+
+func (timeoutLikeError) Error() string     { return "net/http: timeout awaiting response headers" }
+func (timeoutLikeError) Timeout() bool     { return true }
+func (timeoutLikeError) Temporary() bool   { return true }
+func (timeoutLikeError) Is(err error) bool { return err == context.DeadlineExceeded }
 
 // newFileServer 启动一个支持 Range 的 TLS 测试服务器。
 func newFileServer(t *testing.T, data []byte, etag string, hook func(*http.Request)) *httptest.Server {

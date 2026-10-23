@@ -35,11 +35,10 @@ go run . -c 8 -b 1MB https://example.com/file.zip
 真实例子
 ```bash
 edy@edydeMacBook-Pro out % ./httpgo -o abc https://lf3-static.bytednsdoc.com/obj/eden-cn/lapzild-tss/ljhwZthlaukjlkulzlp/protenix/20251217/assets/bhrf1_demo.mp4
-大小: 62.1MB
-分块: 8，并发: 8
-保存: abc
- 100.0% [========================] 62.1MB/62.1MB  7.3MB/s  eta --:--  块 8/8
-完成: abc (62.1MB, 平均 7.8MB/s, 用时 8s)
+大小 62.1MB  ·  分块 8  ·  并发 8  ·  保存 abc
+[ ■  ■  ■  ■  ■  ■  ■  ■ ]
+100.0% [========================] 62.1MB/62.1MB  6.8MB/s  eta --:--  块 8/8
+完成: abc (62.1MB, 平均 8.9MB/s, 用时 7s)
 ```
 ## 用法
 

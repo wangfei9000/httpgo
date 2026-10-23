@@ -200,45 +200,43 @@ func (d *downloader) run(ctx context.Context) error {
 	return d.transfer(ctx)
 }
 
-// probe 用 HEAD 和一次 Range GET 确认文件大小，以及服务器是否支持范围请求。
+// probe 用一次 Range GET 确认文件大小，以及服务器是否支持范围请求。
+// 这次请求失败时才退回 HEAD，避免启动 8 个分块前空等两次响应头。
 func (d *downloader) probe(ctx context.Context) error {
 	pctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 
-	var head remote
-	gotHead := false
-	if h, err := d.probeOnce(pctx, http.MethodHead, ""); err == nil && h.Status >= 200 && h.Status < 300 {
-		head = h
-		gotHead = true
-		if h.Size == 0 {
-			d.meta = h
-			d.meta.AcceptRanges = false
-			return nil
+	got, err := d.probeOnce(pctx, http.MethodGet, "bytes=0-0")
+	if err == nil && (got.Status == http.StatusOK || got.Status == http.StatusPartialContent) {
+		if got.Status == http.StatusOK {
+			got.AcceptRanges = false
 		}
+		d.meta = got
+		if d.meta.FinalURL == "" {
+			d.meta.FinalURL = d.opt.URL
+		}
+		return nil
 	}
 
-	got, err := d.probeOnce(pctx, http.MethodGet, "bytes=0-0")
-	if err != nil {
-		if gotHead && head.Size > 0 {
-			head.AcceptRanges = false
-			d.meta = head
-			return nil
+	head, herr := d.probeOnce(pctx, http.MethodHead, "")
+	if herr == nil && head.Status >= 200 && head.Status < 300 && head.Size >= 0 {
+		head.AcceptRanges = false
+		d.meta = head
+		if d.meta.FinalURL == "" {
+			d.meta.FinalURL = d.opt.URL
 		}
+		return nil
+	}
+	if err != nil {
 		return err
 	}
-	if got.Status != http.StatusOK && got.Status != http.StatusPartialContent {
-		if gotHead && head.Size > 0 {
-			head.AcceptRanges = false
-			d.meta = head
-			return nil
-		}
+	if got.Status != 0 {
 		return fmt.Errorf("探测失败: HTTP %d", got.Status)
 	}
-	d.meta = mergeRemote(head, got)
-	if d.meta.FinalURL == "" {
-		d.meta.FinalURL = d.opt.URL
+	if herr != nil {
+		return herr
 	}
-	return nil
+	return fmt.Errorf("探测失败: HTTP %d", head.Status)
 }
 
 // probeOnce 发一次探测请求，并丢弃最多 1KB 响应体。
@@ -295,39 +293,6 @@ func remoteFrom(resp *http.Response) remote {
 		m.AcceptRanges = true
 	}
 	return m
-}
-
-// mergeRemote 合并 HEAD 与 Range GET 的结果。GET 返回 200 时视为不支持分块。
-func mergeRemote(head, got remote) remote {
-	out := head
-	out.Status = got.Status
-	if got.FinalURL != "" {
-		out.FinalURL = got.FinalURL
-	}
-	if out.FinalURL == "" {
-		out.FinalURL = head.FinalURL
-	}
-	if got.ETag != "" {
-		out.ETag = got.ETag
-	}
-	if got.LastModified != "" {
-		out.LastModified = got.LastModified
-	}
-	if got.Filename != "" {
-		out.Filename = got.Filename
-	}
-	if got.Status == http.StatusPartialContent {
-		out.AcceptRanges = true
-		if got.Size >= 0 {
-			out.Size = got.Size
-		}
-		return out
-	}
-	out.AcceptRanges = false
-	if got.Size >= 0 {
-		out.Size = got.Size
-	}
-	return out
 }
 
 // resolvePath 决定最终文件、.part 和进度文件的路径，并创建所需目录。
@@ -509,8 +474,13 @@ func (d *downloader) transfer(ctx context.Context) (err error) {
 		d.committed = true
 	} else {
 		workers := d.workerCount(len(pending))
-		d.printPlan(len(d.chunks), workers)
-		d.startProgress(ctx)
+		left := d.planLines(len(d.chunks), workers)
+		if !d.printer.tty {
+			for _, line := range left {
+				d.printer.println(line)
+			}
+		}
+		d.startProgress(ctx, left)
 	}
 	defer func() {
 		d.stopProgress()
@@ -708,8 +678,9 @@ func (d *downloader) fetch(ctx context.Context, idx int) error {
 
 	resp, err := d.client.Do(req)
 	if err != nil {
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			return err
+		// 响应头超时也会被标成 DeadlineExceeded，但调用方的上下文还在，应当重试。
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
 		return temporary(err)
 	}
@@ -935,8 +906,8 @@ func (d *downloader) close() error {
 	return first
 }
 
-// startProgress 在后台刷新进度条。静默模式下不启动。
-func (d *downloader) startProgress(ctx context.Context) {
+// startProgress 在后台刷新左侧信息、右侧分块方块和底部进度条。静默模式下不启动。
+func (d *downloader) startProgress(ctx context.Context, left []string) {
 	if d.opt.Quiet {
 		return
 	}
@@ -946,10 +917,12 @@ func (d *downloader) startProgress(ctx context.Context) {
 		printer: d.printer,
 		total:   d.meta.Size,
 		done:    &d.downloaded,
-		chunks:  d.chunkStatus,
+		chunks:  d.chunkDone,
+		left:    left,
 		lastN:   d.downloaded.Load(),
 		lastT:   time.Now(),
 	}
+	m.render()
 	d.progWG.Add(1)
 	go func() {
 		defer d.progWG.Done()
@@ -967,37 +940,39 @@ func (d *downloader) stopProgress() {
 	d.stopProg = nil
 }
 
-// chunkStatus 返回已完成块数和总块数。
-func (d *downloader) chunkStatus() (int, int) {
+// chunkDone 按分块顺序返回每一块是否已经下完。
+func (d *downloader) chunkDone() []bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	n := 0
-	for _, c := range d.chunks {
-		if c.complete() {
-			n++
-		}
+	done := make([]bool, len(d.chunks))
+	for i, c := range d.chunks {
+		done[i] = c.complete()
 	}
-	return n, len(d.chunks)
+	return done
 }
 
-// printPlan 打印文件大小、分块数、并发数和保存路径。
-func (d *downloader) printPlan(chunks, workers int) {
+// planLines 把大小、分块、并发和保存路径合成一行。
+func (d *downloader) planLines(chunks, workers int) []string {
 	if d.opt.Quiet {
-		return
+		return nil
 	}
 	sizeText := "未知"
 	if d.meta.Size >= 0 {
 		sizeText = humanBytes(d.meta.Size)
 	}
-	d.printer.println("大小: " + sizeText)
-	d.printer.println(fmt.Sprintf("分块: %d，并发: %d", chunks, workers))
+	parts := []string{
+		"大小 " + sizeText,
+		fmt.Sprintf("分块 %d", chunks),
+		fmt.Sprintf("并发 %d", workers),
+		"保存 " + d.finalPath,
+	}
 	if d.note != "" {
-		d.printer.println(d.note)
+		parts = append(parts, d.note)
 	}
 	if d.initialDone > 0 {
-		d.printer.println("续传: 已完成 " + humanBytes(d.initialDone))
+		parts = append(parts, "续传 "+humanBytes(d.initialDone))
 	}
-	d.printer.println("保存: " + d.finalPath)
+	return []string{strings.Join(parts, "  ·  ")}
 }
 
 // printSummary 打印完成信息，包括本次平均速度和用时。
@@ -1139,14 +1114,18 @@ func (e *temporaryError) Error() string { return e.err.Error() }
 // Unwrap 返回被包装的原始错误。
 func (e *temporaryError) Unwrap() error { return e.err }
 
-// retryable 判断错误是否值得重试。取消、超时和多数 4xx 不重试。
+// retryable 判断错误是否值得重试。用户取消、调用方截止时间和多数 4xx 不重试。
+// 传输层等待响应头超时会被标成可重试错误，即使它同时满足 DeadlineExceeded。
 func retryable(err error) bool {
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil || errors.Is(err, context.Canceled) {
 		return false
 	}
 	var te *temporaryError
 	if errors.As(err, &te) {
 		return true
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
 	}
 	var se *statusError
 	if errors.As(err, &se) {
