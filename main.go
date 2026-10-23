@@ -12,6 +12,7 @@ import (
 	"time"
 )
 
+// main 解析参数并开始下载。用户中断时保留进度并以 130 退出，其他错误以 1 退出。
 func main() {
 	if err := run(os.Args[1:]); err != nil {
 		if errors.Is(err, context.Canceled) {
@@ -23,6 +24,7 @@ func main() {
 	}
 }
 
+// run 解析命令行并调用 Download。收到 Ctrl+C 或 SIGTERM 时取消本次下载。
 func run(args []string) error {
 	fs := flag.NewFlagSet("httpgo", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
@@ -98,6 +100,7 @@ func run(args []string) error {
 	})
 }
 
+// usage 打印命令说明、参数列表和示例。
 func usage(fs *flag.FlagSet) {
 	out := fs.Output()
 	if out == nil {
@@ -124,8 +127,10 @@ func usage(fs *flag.FlagSet) {
 
 type headerList []string
 
+// String 实现 flag.Value，这里不展示已累积的请求头。
 func (h *headerList) String() string { return "" }
 
+// Set 实现 flag.Value，每出现一次 -H 就追加一条请求头。
 func (h *headerList) Set(v string) error {
 	*h = append(*h, v)
 	return nil

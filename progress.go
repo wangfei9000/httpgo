@@ -19,6 +19,7 @@ type printer struct {
 	lastPrint time.Time
 }
 
+// newPrinter 创建进度输出器。目标是终端时用回车覆盖同一行，否则按普通文本输出。
 func newPrinter(w io.Writer) *printer {
 	if w == nil {
 		w = os.Stderr
@@ -35,6 +36,7 @@ func newPrinter(w io.Writer) *printer {
 	return p
 }
 
+// update 刷新进度行。终端用回车覆盖同一行，非终端最多每秒打印一次。
 func (p *printer) update(line string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -56,6 +58,7 @@ func (p *printer) update(line string) {
 	}
 }
 
+// println 先清掉进度行，再输出一行完整文本。
 func (p *printer) println(line string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -66,6 +69,7 @@ func (p *printer) println(line string) {
 	fmt.Fprintln(p.w, line)
 }
 
+// clearLine 在终端上结束当前进度行。
 func (p *printer) clearLine() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -85,6 +89,7 @@ type meter struct {
 	rate    float64
 }
 
+// loop 定时刷新进度，直到下载结束。
 func (m *meter) loop(ctxDone <-chan struct{}) {
 	t := time.NewTicker(200 * time.Millisecond)
 	defer t.Stop()
@@ -101,6 +106,7 @@ func (m *meter) loop(ctxDone <-chan struct{}) {
 	}
 }
 
+// render 根据已下载字节和速度生成一行进度。
 func (m *meter) render() {
 	now := time.Now()
 	n := m.done.Load()
@@ -116,6 +122,7 @@ func (m *meter) render() {
 	m.printer.update(formatProgress(n, m.total, m.rate, doneChunks, totalChunks))
 }
 
+// formatProgress 拼出百分比、进度条、速度、剩余时间和分块进度。
 func formatProgress(done, total int64, speed float64, chunkDone, chunkTotal int) string {
 	speedText := humanBytes(int64(speed)) + "/s"
 	chunks := fmt.Sprintf("块 %d/%d", chunkDone, chunkTotal)
@@ -146,6 +153,7 @@ func formatProgress(done, total int64, speed float64, chunkDone, chunkTotal int)
 		pct*100, bar, humanBytes(done), humanBytes(total), speedText, eta, chunks)
 }
 
+// formatETA 把剩余时间格式化成秒、分秒或时分。
 func formatETA(d time.Duration) string {
 	if d < 0 {
 		d = 0
@@ -163,6 +171,7 @@ func formatETA(d time.Duration) string {
 	return fmt.Sprintf("%ds", s)
 }
 
+// humanBytes 把字节数换成 B、KB、MB 等可读单位。
 func humanBytes(n int64) string {
 	if n < 0 {
 		n = 0
@@ -183,6 +192,7 @@ func humanBytes(n int64) string {
 	return fmt.Sprintf("%.1f%s", f, units[i])
 }
 
+// formatDuration 把用时收成毫秒或秒。
 func formatDuration(d time.Duration) string {
 	if d < time.Second {
 		return d.Round(time.Millisecond).String()

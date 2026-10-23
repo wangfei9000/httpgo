@@ -20,6 +20,7 @@ import (
 	"time"
 )
 
+// TestPlanChunks 检查均分、按块大小切分，以及小文件退回单连接。
 func TestPlanChunks(t *testing.T) {
 	got := evenSplit(10, 3)
 	want := []span{{0, 3}, {4, 6}, {7, 9}}
@@ -56,6 +57,7 @@ func TestPlanChunks(t *testing.T) {
 	}
 }
 
+// TestParseSizeAndNames 检查大小解析、URL 文件名、Content-Disposition 和 Content-Range。
 func TestParseSizeAndNames(t *testing.T) {
 	n, err := parseSize("4MB")
 	if err != nil || n != 4<<20 {
@@ -93,6 +95,7 @@ func TestParseSizeAndNames(t *testing.T) {
 	}
 }
 
+// TestDownloadHTTPS 检查并发 HTTPS 下载、自定义请求头，以及已完成文件不再重下。
 func TestDownloadHTTPS(t *testing.T) {
 	data := make([]byte, 2<<20)
 	for i := range data {
@@ -171,6 +174,7 @@ func TestDownloadHTTPS(t *testing.T) {
 	}
 }
 
+// TestResume 检查已完成的块会被跳过，未完成的块从已写入偏移继续。
 func TestResume(t *testing.T) {
 	data := make([]byte, 1000)
 	for i := range data {
@@ -256,6 +260,7 @@ func TestResume(t *testing.T) {
 	}
 }
 
+// TestCommitCompletedPart 检查进度已全部完成时只提交 .part，不再发下载请求。
 func TestCommitCompletedPart(t *testing.T) {
 	data := []byte("already-complete")
 	var downloads atomic.Int32
@@ -305,6 +310,7 @@ func TestCommitCompletedPart(t *testing.T) {
 	}
 }
 
+// TestNoRangeAndRetryAndEmpty 检查不支持 Range 的单连接下载、5xx 重试和空文件。
 func TestNoRangeAndRetryAndEmpty(t *testing.T) {
 	data := []byte("hello-httpgo-no-range")
 	plain := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -402,6 +408,7 @@ func TestNoRangeAndRetryAndEmpty(t *testing.T) {
 	}
 }
 
+// TestCancelThenResume 检查取消后进度被保存，再次下载能补全文件。
 func TestCancelThenResume(t *testing.T) {
 	data := bytes.Repeat([]byte{7}, 64*1024)
 	entered := make(chan struct{})
@@ -472,6 +479,7 @@ func TestCancelThenResume(t *testing.T) {
 	}
 }
 
+// TestProcessLock 检查另一个进程占用同一文件时，本次加锁会失败。
 func TestProcessLock(t *testing.T) {
 	if os.Getenv("HTTPGO_LOCK_CHILD") == "1" {
 		f, err := os.OpenFile(os.Getenv("HTTPGO_LOCK_FILE"), os.O_CREATE|os.O_RDWR, 0o644)
@@ -528,18 +536,21 @@ type safeBuf struct {
 	b  bytes.Buffer
 }
 
+// Write 在锁内写入，供测试收集子进程输出。
 func (s *safeBuf) Write(p []byte) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.Write(p)
 }
 
+// String 在锁内返回已收集的文本。
 func (s *safeBuf) String() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.b.String()
 }
 
+// TestRunFlags 检查缺少地址、非法并发、帮助和非法协议时的结果。
 func TestRunFlags(t *testing.T) {
 	if err := run(nil); err == nil {
 		t.Fatal("expected usage error")
@@ -555,6 +566,7 @@ func TestRunFlags(t *testing.T) {
 	}
 }
 
+// newFileServer 启动一个支持 Range 的 TLS 测试服务器。
 func newFileServer(t *testing.T, data []byte, etag string, hook func(*http.Request)) *httptest.Server {
 	t.Helper()
 	return httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -565,6 +577,7 @@ func newFileServer(t *testing.T, data []byte, etag string, hook func(*http.Reque
 	}))
 }
 
+// serveBytes 按 Range 头返回文件片段，没有 Range 时返回整个文件。
 func serveBytes(w http.ResponseWriter, r *http.Request, data []byte, etag string) {
 	w.Header().Set("Accept-Ranges", "bytes")
 	w.Header().Set("ETag", etag)
@@ -596,6 +609,7 @@ func serveBytes(w http.ResponseWriter, r *http.Request, data []byte, etag string
 	_, _ = w.Write(data[start : end+1])
 }
 
+// parseSingleRange 解析测试请求里的单个 bytes 区间。
 func parseSingleRange(h string, size int64) (int64, int64, error) {
 	h = strings.TrimSpace(strings.TrimPrefix(h, "bytes="))
 	a, b, ok := strings.Cut(h, "-")
@@ -621,6 +635,7 @@ func parseSingleRange(h string, size int64) (int64, int64, error) {
 	return start, end, nil
 }
 
+// testClient 创建信任测试服务器证书的 HTTP 客户端。
 func testClient(srv *httptest.Server, n int) *http.Client {
 	c := newClient(n)
 	tr := c.Transport.(*http.Transport)
